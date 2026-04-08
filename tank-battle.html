@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>坦克大战 - Battle City</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; font-family: 'Courier New', monospace; overflow: hidden; }
+canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
+#game-wrapper { position: relative; display: flex; gap: 0; }
+#sidebar { width: 80px; background: #636363; display: flex; flex-direction: column; align-items: center; padding-top: 20px; gap: 10px; }
+.sidebar-label { color: #000; font-size: 12px; font-weight: bold; }
+.sidebar-value { color: #000; font-size: 16px; font-weight: bold; }
+#overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10; pointer-events: none; }
+#overlay.active { pointer-events: all; background: rgba(0,0,0,0.85); }
+#overlay h1 { color: #e44; font-size: 48px; text-shadow: 2px 2px #000; margin-bottom: 20px; }
+#overlay p { color: #fff; font-size: 18px; margin: 5px 0; }
+#overlay .blink { animation: blink 1s infinite; }
+@keyframes blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+</style>
+</head>
+<body>
+<div id="game-wrapper">
+  <canvas id="game"></canvas>
+  <div id="sidebar">
+    <div class="sidebar-label">ENEMY</div>
+    <div id="enemy-count" class="sidebar-value">20</div>
+    <div class="sidebar-label" style="margin-top:20px;">IP</div>
+    <div id="player-lives" class="sidebar-value">3</div>
+    <div class="sidebar-label" style="margin-top:20px;">STAGE</div>
+    <div id="stage-num" class="sidebar-value">1</div>
+    <div class="sidebar-label" style="margin-top:40px;">SCORE</div>
+    <div id="score-display" class="sidebar-value">0</div>
+  </div>
+  <div id="overlay" class="active">
+    <h1>坦克大战</h1>
+    <p>BATTLE CITY</p>
+    <p style="margin-top:30px;">WASD / Arrow Keys - Move</p>
+    <p>Space / J - Fire</p>
+    <p style="margin-top:20px;" class="blink">Press ENTER to Start</p>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// Battle City - NES Clone
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+
+// The classic NES Battle City field is 26x26 tiles (each tile = 8px on NES)
+// We'll use 26x26 grid, each cell = 16px => 416x416, then scale up
+const GRID = 26;
+const CELL = 16;
+const FIELD = GRID * CELL; // 416
+const SCALE = 1.5;
+canvas.width = FIELD;
+canvas.height = FIELD;
+canvas.style.width = (FIELD * SCALE) + 'px';
+canvas.style.height = (FIELD * SCALE) + 'px';
+
+// Tile types
+const T = {
+  EMPTY: 0,
+  BRICK: 1,
+  STEEL: 2,
+  WATER: 3,
+  TREE: 4,
+  ICE: 5,
+  EAGLE: 6,
+  EAGLE_DEAD: 7
+};
+
+// Directions
+const DIR = { UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3 };
+const DX = [0, 1, 0, -1];
+const DY = [-1, 0, 1, 0];
+
+// Colors
+const COLORS = {
+  bg: '#000000',
+  brick: '#8B4513',
+  brickLight: '#CD853F',
+  steel: '#C0C0C0',
+  steelDark: '#808080',
+  water: '#0044AA',
+  waterLight: '#0066DD',
+  tree: '#006600',
+  treeLight: '#00AA00',
+  ice: '#CCDDFF',
+  iceDark: '#AABBDD',
+  eagle: '#FFD700',
+  eagleDead: '#444444',
+  playerBody: '#FFD700',
+  playerTurret: '#CCAA00',
+  playerTrack: '#887700',
+  enemyBody: '#CCCCCC',
+  enemyTurret: '#999999',
+  enemyTrack: '#777777',
+  enemyFast: '#88AAFF',
+  enemyArmor: '#FF6666',
+  enemyPower: '#FF44FF',
+  bullet: '#FFFFFF',
+  explosion: ['#FF0000', '#FF6600', '#FFAA00', '#FFFF00', '#FFFFFF'],
+  powerup: '#FF0000',
+  shield: '#FFFFFF',
+  spawn: '#FFFFFF'
+};
+
+// Game state
+let gameState = 'title'; // title, playing, gameover, stageclear
+let stage = 1;
+let score = 0;
+let lives = 3;
+let map = [];
+let player = null;
+let enemies = [];
+let bullets = [];
+let explosions = [];
+let powerups = [];
+let spawnEffects = [];
+let enemyQueue = [];
+let enemySpawnTimer = 0;
+let enemiesOnField = 0;
+let maxEnemiesOnField = 4;
+let eagleAlive = true;
+let freezeTimer = 0;
+let stageTransitionTimer = 0;
+let keys = {};
+
+// ============================================================
+// Level data - classic Battle City maps (simplified)
+// ============================================================
+// Map is 26x26, but we define in 13x13 blocks (each block = 2x2 cells)
+// 0=empty, 1=brick, 2=steel, 3=water, 4=tree, 5=ice
+
+const LEVELS = [
+  // Stage 1
+  [
+    "0000000000000",
+    "0110110110110",
+    "0110110110110",
+    "0110110110110",
+    "0110110110110",
+    "0110000000110",
+    "0000011100000",
+    "0110011100110",
+    "0110000000110",
+    "0110000000110",
+    "0000011100000",
+    "0000010100000",
+    "0000010100000"
+  ],
+  // Stage 2
+  [
+    "0000000000000",
+    "0110110110110",
+    "0110110110110",
+    "0220000000220",
+    "0110110110110",
+    "0000110110000",
+    "0011000001100",
+    "0000110110000",
+    "0110110110110",
+    "0110000000110",
+    "0000011100000",
+    "0000010100000",
+    "0000010100000"
+  ],
+  // Stage 3
+  [
+    "0000000000000",
+    "0110330110110",
+    "0110330110110",
+    "0110000000110",
+    "0000220220000",
+    "0110000000110",
+    "0003300003300",
+    "0110000000110",
+    "0000220220000",
+    "0110000000110",
+    "0000011100000",
+    "0000010100000",
+    "0000010100000"
+  ],
+  // Stage 4
+  [
+    "0440000000440",
+    "0440110110440",
+    "0000110110000",
+    "0110220220110",
+    "0110000000110",
+    "0000011000000",
+    "2200011002200",
+    "0000011000000",
+    "0110000000110",
+    "0110220220110",
+    "0000011100000",
+    "0000010100000",
+    "0000010100000"
+  ],
+  // Stage 5
+  [
+    "0000000000000",
+    "2110110110112",
+    "0110000000110",
+    "0003311133000",
+    "0110000000110",
+    "0110220220110",
+    "0000000000000",
+    "0110220220110",
+    "0110000000110",
+    "0003311133000",
+    "0000011100000",
+    "0000010100000",
+    "0000010100000"
+  ]
+];
+
+// Enemy types: [speed, bulletSpeed, lives, points]
+const ENEMY_TYPES = {
+  basic:  { speed: 0.8, bulletSpeed: 2, hp: 1, points: 100, color: COLORS.enemyBody, turretColor: COLORS.enemyTurret },
+  fast:   { speed: 1.6, bulletSpeed: 3, hp: 1, points: 200, color: COLORS.enemyFast, turretColor: '#6688CC' },
+  power:  { speed: 0.8, bulletSpeed: 3, hp: 1, points: 300, color: COLORS.enemyPower, turretColor: '#CC22CC' },
+  armor:  { speed: 0.8, bulletSpeed: 2, hp: 4, points: 400, color: COLORS.enemyArmor, turretColor: '#CC3333' }
+};
+
+// ============================================================
+// Map building
+// ============================================================
+function buildMap(levelIndex) {
+  map = [];
+  for (let y = 0; y < GRID; y++) {
+    map[y] = [];
+    for (let x = 0; x < GRID; x++) {
+      map[y][x] = T.EMPTY;
+    }
+  }
+
+  const level = LEVELS[levelIndex % LEVELS.length];
+  for (let by = 0; by < 13; by++) {
+    for (let bx = 0; bx < 13; bx++) {
+      const tile = parseInt(level[by][bx]);
+      const gx = bx * 2;
+      const gy = by * 2;
+      if (tile > 0) {
+        map[gy][gx] = tile;
+        map[gy][gx + 1] = tile;
+        map[gy + 1][gx] = tile;
+        map[gy + 1][gx + 1] = tile;
+      }
+    }
+  }
+
+  // Place eagle at bottom center
+  const ex = 12, ey = 24;
+  map[ey][ex] = T.EAGLE;
+  map[ey][ex + 1] = T.EAGLE;
+  map[ey + 1][ex] = T.EAGLE;
+  map[ey + 1][ex + 1] = T.EAGLE;
+
+  // Protect eagle with bricks
+  for (let x = ex - 1; x <= ex + 2; x++) {
+    if (x >= 0 && x < GRID) map[ey - 1][x] = T.BRICK;
+  }
+  map[ey][ex - 1] = T.BRICK;
+  map[ey + 1][ex - 1] = T.BRICK;
+  map[ey][ex + 2] = T.BRICK;
+  map[ey + 1][ex + 2] = T.BRICK;
+
+  // Clear spawn points
+  clearArea(0, 0, 2, 2);
+  clearArea(12, 0, 2, 2);
+  clearArea(24, 0, 2, 2);
+  clearArea(8, 24, 2, 2);
+  clearArea(16, 24, 2, 2);
+
+  eagleAlive = true;
+}
+
+function clearArea(x, y, w, h) {
+  for (let dy = 0; dy < h; dy++) {
+    for (let dx = 0; dx < w; dx++) {
+      const cx = x + dx, cy = y + dy;
+      if (cx >= 0 && cx < GRID && cy >= 0 && cy < GRID) {
+        if (map[cy][cx] !== T.EAGLE) map[cy][cx] = T.EMPTY;
+      }
+    }
+  }
+}
+
+// ============================================================
+// Tank class
+// ============================================================
+class Tank {
+  constructor(x, y, dir, isPlayer) {
+    this.x = x;
+    this.y = y;
+    this.dir = dir;
+    this.isPlayer = isPlayer;
+    this.speed = isPlayer ? 1.2 : 0.8;
+    this.bulletSpeed = isPlayer ? 3 : 2;
+    this.hp = isPlayer ? 1 : 1;
+    this.maxBullets = isPlayer ? 2 : 1;
+    this.activeBullets = 0;
+    this.fireTimer = 0;
+    this.fireCooldown = isPlayer ? 15 : 60;
+    this.moving = false;
+    this.animFrame = 0;
+    this.animTimer = 0;
+    this.shield = isPlayer ? 120 : 0; // frames of invincibility
+    this.powerLevel = 0; // player upgrade level
+    this.type = 'basic';
+    this.alive = true;
+    this.spawnTimer = 40;
+    // AI
+    this.aiTimer = 0;
+    this.aiDirChangeInterval = 60 + Math.random() * 120;
+    this.aiFireChance = 0.02;
+    // Colors
+    this.bodyColor = isPlayer ? COLORS.playerBody : COLORS.enemyBody;
+    this.turretColor = isPlayer ? COLORS.playerTurret : COLORS.enemyTurret;
+    this.trackColor = isPlayer ? COLORS.playerTrack : COLORS.enemyTrack;
+  }
+
+  setEnemyType(type) {
+    const t = ENEMY_TYPES[type];
+    this.type = type;
+    this.speed = t.speed;
+    this.bulletSpeed = t.bulletSpeed;
+    this.hp = t.hp;
+    this.bodyColor = t.color;
+    this.turretColor = t.turretColor;
+    if (type === 'fast') this.aiDirChangeInterval = 30 + Math.random() * 60;
+    if (type === 'power') { this.fireCooldown = 40; this.aiFireChance = 0.04; }
+  }
+
+  get cx() { return this.x + CELL; }
+  get cy() { return this.y + CELL; }
+
+  canMove(nx, ny) {
+    // Tank occupies 2x2 cells
+    const size = CELL * 2 - 2;
+    const corners = [
+      [nx + 1, ny + 1],
+      [nx + size, ny + 1],
+      [nx + 1, ny + size],
+      [nx + size, ny + size]
+    ];
+
+    for (const [px, py] of corners) {
+      if (px < 0 || py < 0 || px >= FIELD || py >= FIELD) return false;
+      const gx = Math.floor(px / CELL);
+      const gy = Math.floor(py / CELL);
+      const tile = map[gy]?.[gx];
+      if (tile === T.BRICK || tile === T.STEEL || tile === T.WATER || tile === T.EAGLE) return false;
+    }
+
+    // Check collision with other tanks
+    const tanks = this.isPlayer ? enemies : [player, ...enemies];
+    for (const other of tanks) {
+      if (!other || !other.alive || other === this || other.spawnTimer > 0) continue;
+      if (Math.abs(nx - other.x) < CELL * 2 - 2 && Math.abs(ny - other.y) < CELL * 2 - 2) return false;
+    }
+
+    return true;
+  }
+
+  move(dir) {
+    this.dir = dir;
+    this.moving = true;
+    const spd = this.speed;
+    let nx = this.x + DX[dir] * spd;
+    let ny = this.y + DY[dir] * spd;
+
+    // Snap to grid on perpendicular axis for smoother movement
+    if (dir === DIR.UP || dir === DIR.DOWN) {
+      const snapped = Math.round(this.x / (CELL / 2)) * (CELL / 2);
+      if (Math.abs(this.x - snapped) < spd) nx = snapped;
+      else nx = this.x + Math.sign(snapped - this.x) * Math.min(spd, Math.abs(snapped - this.x));
+      ny = this.y + DY[dir] * spd;
+    } else {
+      const snapped = Math.round(this.y / (CELL / 2)) * (CELL / 2);
+      if (Math.abs(this.y - snapped) < spd) ny = snapped;
+      else ny = this.y + Math.sign(snapped - this.y) * Math.min(spd, Math.abs(snapped - this.y));
+      nx = this.x + DX[dir] * spd;
+    }
+
+    if (this.canMove(nx, ny)) {
+      this.x = nx;
+      this.y = ny;
+    }
+  }
+
+  fire() {
+    if (this.fireTimer > 0 || this.activeBullets >= this.maxBullets) return;
+    this.fireTimer = this.fireCooldown;
+
+    const bx = this.cx - 2 + DX[this.dir] * CELL;
+    const by = this.cy - 2 + DY[this.dir] * CELL;
+
+    bullets.push({
+      x: bx, y: by, dir: this.dir,
+      speed: this.bulletSpeed + (this.isPlayer && this.powerLevel >= 1 ? 1 : 0),
+      owner: this,
+      isPlayer: this.isPlayer,
+      power: this.isPlayer && this.powerLevel >= 3 ? 2 : 1 // power 2 = can destroy steel
+    });
+    this.activeBullets++;
+  }
+
+  update() {
+    if (this.spawnTimer > 0) { this.spawnTimer--; return; }
+    if (this.fireTimer > 0) this.fireTimer--;
+    if (this.shield > 0) this.shield--;
+
+    this.animTimer++;
+    if (this.animTimer > 4) { this.animTimer = 0; this.animFrame = (this.animFrame + 1) % 2; }
+
+    if (!this.isPlayer) this.updateAI();
+  }
+
+  updateAI() {
+    if (freezeTimer > 0) return;
+
+    this.aiTimer++;
+    let wantFire = Math.random() < this.aiFireChance;
+
+    // Change direction periodically or when hitting a wall
+    if (this.aiTimer >= this.aiDirChangeInterval) {
+      this.aiTimer = 0;
+      this.aiDirChangeInterval = 60 + Math.random() * 120;
+      this.dir = Math.floor(Math.random() * 4);
+    }
+
+    // Try to move
+    const ox = this.x, oy = this.y;
+    this.move(this.dir);
+    if (this.x === ox && this.y === oy) {
+      // Stuck, change direction
+      this.dir = Math.floor(Math.random() * 4);
+      this.aiTimer = 0;
+    }
+
+    // Bias towards moving down initially
+    if (this.y < FIELD / 3 && Math.random() < 0.01) this.dir = DIR.DOWN;
+
+    // Fire
+    if (wantFire) this.fire();
+  }
+
+  draw() {
+    if (!this.alive) return;
+
+    if (this.spawnTimer > 0) {
+      drawSpawnEffect(this.cx, this.cy, this.spawnTimer);
+      return;
+    }
+
+    ctx.save();
+    ctx.translate(this.cx, this.cy);
+    ctx.rotate(this.dir * Math.PI / 2);
+
+    const s = CELL; // half-size reference
+
+    // Tracks
+    ctx.fillStyle = this.trackColor;
+    const trackOffset = this.animFrame * 2;
+    ctx.fillRect(-s + 1, -s + trackOffset, 5, s * 2 - 2);
+    ctx.fillRect(s - 6, -s + trackOffset, 5, s * 2 - 2);
+
+    // Body
+    ctx.fillStyle = this.bodyColor;
+    ctx.fillRect(-s + 5, -s + 2, s * 2 - 10, s * 2 - 4);
+
+    // Turret
+    ctx.fillStyle = this.turretColor;
+    ctx.fillRect(-4, -4, 8, 8);
+
+    // Barrel
+    ctx.fillStyle = this.turretColor;
+    ctx.fillRect(-2, -s, 4, s - 2);
+
+    // Armor indicator for armored enemies
+    if (!this.isPlayer && this.type === 'armor' && this.hp > 1) {
+      ctx.strokeStyle = this.hp > 2 ? '#00FF00' : '#FFFF00';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-s + 3, -s + 1, s * 2 - 6, s * 2 - 2);
+    }
+
+    ctx.restore();
+
+    // Shield effect
+    if (this.shield > 0 && Math.floor(this.shield / 3) % 2 === 0) {
+      ctx.strokeStyle = COLORS.shield;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(this.cx, this.cy, s + 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+}
+
+// ============================================================
+// Rendering helpers
+// ============================================================
+function drawTile(x, y, type) {
+  const px = x * CELL, py = y * CELL;
+
+  switch (type) {
+    case T.BRICK:
+      ctx.fillStyle = COLORS.brick;
+      ctx.fillRect(px, py, CELL, CELL);
+      ctx.fillStyle = COLORS.brickLight;
+      // Brick pattern
+      ctx.fillRect(px, py, CELL / 2 - 1, CELL / 2 - 1);
+      ctx.fillRect(px + CELL / 2, py + CELL / 2, CELL / 2 - 1, CELL / 2 - 1);
+      ctx.fillStyle = '#5C3310';
+      ctx.fillRect(px + CELL / 2 - 1, py, 1, CELL);
+      ctx.fillRect(px, py + CELL / 2 - 1, CELL, 1);
+      break;
+
+    case T.STEEL:
+      ctx.fillStyle = COLORS.steel;
+      ctx.fillRect(px, py, CELL, CELL);
+      ctx.fillStyle = COLORS.steelDark;
+      ctx.fillRect(px + 1, py + 1, CELL - 2, 2);
+      ctx.fillRect(px + 1, py + 1, 2, CELL - 2);
+      ctx.fillStyle = '#E0E0E0';
+      ctx.fillRect(px + CELL - 3, py + 3, 2, CELL - 4);
+      ctx.fillRect(px + 3, py + CELL - 3, CELL - 4, 2);
+      break;
+
+    case T.WATER:
+      ctx.fillStyle = COLORS.water;
+      ctx.fillRect(px, py, CELL, CELL);
+      ctx.fillStyle = COLORS.waterLight;
+      const waveOff = Math.sin(Date.now() / 300 + x + y) * 2;
+      ctx.fillRect(px + 2, py + 4 + waveOff, CELL - 4, 2);
+      ctx.fillRect(px + 2, py + 10 + waveOff, CELL - 4, 2);
+      break;
+
+    case T.TREE:
+      ctx.fillStyle = COLORS.tree;
+      ctx.fillRect(px, py, CELL, CELL);
+      ctx.fillStyle = COLORS.treeLight;
+      ctx.fillRect(px + 2, py + 2, 4, 4);
+      ctx.fillRect(px + 8, py + 6, 5, 5);
+      ctx.fillRect(px + 3, py + 9, 4, 4);
+      break;
+
+    case T.ICE:
+      ctx.fillStyle = COLORS.ice;
+      ctx.fillRect(px, py, CELL, CELL);
+      ctx.fillStyle = COLORS.iceDark;
+      ctx.fillRect(px + 2, py + 3, 5, 1);
+      ctx.fillRect(px + 8, py + 8, 4, 1);
+      break;
+
+    case T.EAGLE:
+      ctx.fillStyle = COLORS.eagle;
+      ctx.fillRect(px + 2, py + 2, CELL - 4, CELL - 4);
+      ctx.fillStyle = '#AA8800';
+      ctx.fillRect(px + 4, py + 4, CELL - 8, CELL - 8);
+      // Wing shape
+      ctx.fillStyle = '#FFEE00';
+      ctx.fillRect(px + 6, py + 3, 4, 3);
+      break;
+
+    case T.EAGLE_DEAD:
+      ctx.fillStyle = COLORS.eagleDead;
+      ctx.fillRect(px, py, CELL, CELL);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(px + 3, py + 3, CELL - 6, CELL - 6);
+      break;
+  }
+}
+
+function drawSpawnEffect(cx, cy, timer) {
+  const phase = Math.floor(timer / 4) % 4;
+  const sizes = [14, 10, 6, 10];
+  const s = sizes[phase];
+  ctx.strokeStyle = COLORS.spawn;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(cx - s, cy - s, s * 2, s * 2);
+  ctx.lineWidth = 1;
+  ctx.strokeRect(cx - s + 3, cy - s + 3, (s - 3) * 2, (s - 3) * 2);
+}
+
+function drawExplosion(exp) {
+  const progress = exp.timer / exp.maxTimer;
+  const radius = exp.size * (1 - Math.abs(progress - 0.5) * 2) * 1.5;
+  const colorIdx = Math.min(4, Math.floor((1 - progress) * 5));
+
+  ctx.fillStyle = COLORS.explosion[colorIdx];
+  ctx.beginPath();
+  ctx.arc(exp.x, exp.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (radius > 4) {
+    ctx.fillStyle = COLORS.explosion[Math.min(4, colorIdx + 1)];
+    ctx.beginPath();
+    ctx.arc(exp.x, exp.y, radius * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawPowerup(pu) {
+  if (Math.floor(Date.now() / 200) % 2 === 0) return; // blink
+  ctx.fillStyle = '#FF0000';
+  ctx.fillRect(pu.x - 12, pu.y - 12, 24, 24);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const labels = { star: '★', tank: '♦', shield: '◎', bomb: '✱', clock: '◷', shovel: '▣' };
+  ctx.fillText(labels[pu.type] || '?', pu.x, pu.y);
+}
+
+// ============================================================
+// Game logic
+// ============================================================
+function initStage() {
+  buildMap((stage - 1) % LEVELS.length);
+  bullets = [];
+  explosions = [];
+  powerups = [];
+  spawnEffects = [];
+  enemies = [];
+  freezeTimer = 0;
+  enemiesOnField = 0;
+  enemySpawnTimer = 0;
+
+  // Build enemy queue (20 enemies per stage)
+  enemyQueue = [];
+  const totalEnemies = 20;
+  for (let i = 0; i < totalEnemies; i++) {
+    let type = 'basic';
+    if (i % 7 === 3) type = 'fast';
+    if (i % 7 === 5) type = 'power';
+    if (i % 5 === 4) type = 'armor';
+    // Higher stages = more tough enemies
+    if (stage > 3 && Math.random() < 0.3) type = 'armor';
+    enemyQueue.push(type);
+  }
+
+  // Create player
+  player = new Tank(8 * CELL, 24 * CELL, DIR.UP, true);
+  player.shield = 120;
+
+  updateSidebar();
+  stageTransitionTimer = 60;
+}
+
+function spawnEnemy() {
+  if (enemyQueue.length === 0 || enemiesOnField >= maxEnemiesOnField) return;
+
+  const spawnPoints = [[0, 0], [12 * CELL, 0], [24 * CELL, 0]];
+  // Find an unoccupied spawn point
+  for (const [sx, sy] of spawnPoints) {
+    let blocked = false;
+    const allTanks = [player, ...enemies];
+    for (const t of allTanks) {
+      if (t && t.alive && Math.abs(t.x - sx) < CELL * 3 && Math.abs(t.y - sy) < CELL * 3) {
+        blocked = true;
+        break;
+      }
+    }
+    if (!blocked) {
+      const enemy = new Tank(sx, sy, DIR.DOWN, false);
+      const type = enemyQueue.shift();
+      enemy.setEnemyType(type);
+      // Every 4th enemy is a "flashing" enemy that drops a powerup
+      if ((20 - enemyQueue.length) % 6 === 4) enemy.dropsPowerup = true;
+      enemies.push(enemy);
+      enemiesOnField++;
+      updateSidebar();
+      return;
+    }
+  }
+}
+
+function updateBullets() {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += DX[b.dir] * b.speed;
+    b.y += DY[b.dir] * b.speed;
+
+    // Out of bounds
+    if (b.x < 0 || b.y < 0 || b.x >= FIELD || b.y >= FIELD) {
+      destroyBullet(i);
+      addExplosion(b.x, b.y, 6);
+      continue;
+    }
+
+    // Tile collision
+    let hit = false;
+    const checkPoints = [[b.x, b.y], [b.x + 3, b.y], [b.x, b.y + 3], [b.x + 3, b.y + 3]];
+    for (const [px, py] of checkPoints) {
+      const gx = Math.floor(px / CELL);
+      const gy = Math.floor(py / CELL);
+      if (gx < 0 || gy < 0 || gx >= GRID || gy >= GRID) continue;
+      const tile = map[gy][gx];
+
+      if (tile === T.BRICK) {
+        map[gy][gx] = T.EMPTY;
+        hit = true;
+      } else if (tile === T.STEEL) {
+        if (b.power >= 2) map[gy][gx] = T.EMPTY;
+        hit = true;
+      } else if (tile === T.EAGLE || tile === T.EAGLE_DEAD) {
+        if (tile === T.EAGLE) {
+          // Destroy eagle - game over
+          destroyEagle();
+          hit = true;
+        }
+      }
+    }
+
+    if (hit) {
+      addExplosion(b.x + 2, b.y + 2, 8);
+      destroyBullet(i);
+      continue;
+    }
+
+    // Bullet vs bullet collision
+    for (let j = i - 1; j >= 0; j--) {
+      const b2 = bullets[j];
+      if (Math.abs(b.x - b2.x) < 6 && Math.abs(b.y - b2.y) < 6) {
+        destroyBullet(i);
+        destroyBullet(j);
+        break;
+      }
+    }
+    if (i >= bullets.length || bullets[i] !== b) continue;
+
+    // Hit tanks
+    if (b.isPlayer) {
+      // Hit enemies
+      for (const enemy of enemies) {
+        if (!enemy.alive || enemy.spawnTimer > 0) continue;
+        if (b.x > enemy.x && b.x < enemy.x + CELL * 2 && b.y > enemy.y && b.y < enemy.y + CELL * 2) {
+          enemy.hp--;
+          if (enemy.hp <= 0) {
+            enemy.alive = false;
+            enemiesOnField--;
+            score += ENEMY_TYPES[enemy.type].points;
+            addExplosion(enemy.cx, enemy.cy, 20);
+            if (enemy.dropsPowerup) spawnPowerup(enemy.cx, enemy.cy);
+          } else {
+            addExplosion(b.x, b.y, 6);
+          }
+          destroyBullet(i);
+          updateSidebar();
+          break;
+        }
+      }
+    } else {
+      // Hit player
+      if (player && player.alive && player.spawnTimer === 0 && player.shield <= 0) {
+        if (b.x > player.x && b.x < player.x + CELL * 2 && b.y > player.y && b.y < player.y + CELL * 2) {
+          playerDeath();
+          destroyBullet(i);
+        }
+      }
+    }
+  }
+}
+
+function destroyBullet(index) {
+  const b = bullets[index];
+  if (b && b.owner) b.owner.activeBullets = Math.max(0, b.owner.activeBullets - 1);
+  bullets.splice(index, 1);
+}
+
+function addExplosion(x, y, size) {
+  explosions.push({ x, y, size, timer: 1, maxTimer: 20 });
+}
+
+function destroyEagle() {
+  eagleAlive = false;
+  for (let y = 24; y <= 25; y++) {
+    for (let x = 12; x <= 13; x++) {
+      if (map[y] && map[y][x] !== undefined) map[y][x] = T.EAGLE_DEAD;
+    }
+  }
+  addExplosion(13 * CELL, 25 * CELL, 30);
+  setTimeout(() => { if (gameState === 'playing') gameOver(); }, 1500);
+}
+
+function playerDeath() {
+  addExplosion(player.cx, player.cy, 24);
+  lives--;
+  updateSidebar();
+  if (lives <= 0) {
+    player.alive = false;
+    setTimeout(() => gameOver(), 1500);
+  } else {
+    // Respawn
+    player.alive = false;
+    setTimeout(() => {
+      if (gameState !== 'playing') return;
+      player = new Tank(8 * CELL, 24 * CELL, DIR.UP, true);
+      player.shield = 120;
+    }, 1000);
+  }
+}
+
+function spawnPowerup(x, y) {
+  const types = ['star', 'tank', 'shield', 'bomb', 'clock', 'shovel'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  powerups.push({ x, y, type, timer: 600 }); // 10 seconds
+}
+
+function collectPowerup(pu) {
+  score += 500;
+  switch (pu.type) {
+    case 'star':
+      player.powerLevel = Math.min(3, player.powerLevel + 1);
+      if (player.powerLevel >= 2) player.maxBullets = 2;
+      player.speed = 1.2 + player.powerLevel * 0.2;
+      break;
+    case 'tank':
+      lives++;
+      break;
+    case 'shield':
+      player.shield = 600; // 10 seconds
+      break;
+    case 'bomb':
+      // Destroy all enemies on field
+      for (const e of enemies) {
+        if (e.alive) {
+          addExplosion(e.cx, e.cy, 20);
+          score += ENEMY_TYPES[e.type].points;
+          e.alive = false;
+          enemiesOnField--;
+        }
+      }
+      break;
+    case 'clock':
+      freezeTimer = 600; // Freeze enemies for 10 seconds
+      break;
+    case 'shovel':
+      // Fortify eagle with steel (temporary)
+      const ex = 12, ey = 24;
+      for (let x = ex - 1; x <= ex + 2; x++) {
+        if (x >= 0 && x < GRID && map[ey - 1]) map[ey - 1][x] = T.STEEL;
+      }
+      if (map[ey]) { map[ey][ex - 1] = T.STEEL; map[ey][ex + 2] = T.STEEL; }
+      if (map[ey + 1]) { map[ey + 1][ex - 1] = T.STEEL; map[ey + 1][ex + 2] = T.STEEL; }
+      // Revert after some time
+      setTimeout(() => {
+        if (gameState !== 'playing') return;
+        for (let x = ex - 1; x <= ex + 2; x++) {
+          if (x >= 0 && x < GRID && map[ey - 1] && map[ey - 1][x] === T.STEEL) map[ey - 1][x] = T.BRICK;
+        }
+        if (map[ey]) { if (map[ey][ex - 1] === T.STEEL) map[ey][ex - 1] = T.BRICK; if (map[ey][ex + 2] === T.STEEL) map[ey][ex + 2] = T.BRICK; }
+        if (map[ey + 1]) { if (map[ey + 1][ex - 1] === T.STEEL) map[ey + 1][ex - 1] = T.BRICK; if (map[ey + 1][ex + 2] === T.STEEL) map[ey + 1][ex + 2] = T.BRICK; }
+      }, 10000);
+      break;
+  }
+  updateSidebar();
+}
+
+function gameOver() {
+  gameState = 'gameover';
+  overlay.innerHTML = '<h1>GAME OVER</h1><p>Stage: ' + stage + '</p><p>Score: ' + score + '</p><p style="margin-top:30px;" class="blink">Press ENTER to Restart</p>';
+  overlay.classList.add('active');
+}
+
+function stageClear() {
+  gameState = 'stageclear';
+  stage++;
+  overlay.innerHTML = '<h1>STAGE ' + stage + '</h1><p class="blink">Get Ready!</p>';
+  overlay.classList.add('active');
+  setTimeout(() => {
+    if (gameState === 'stageclear') {
+      overlay.classList.remove('active');
+      gameState = 'playing';
+      initStage();
+    }
+  }, 2000);
+}
+
+function updateSidebar() {
+  document.getElementById('enemy-count').textContent = enemyQueue.length;
+  document.getElementById('player-lives').textContent = lives;
+  document.getElementById('stage-num').textContent = stage;
+  document.getElementById('score-display').textContent = score;
+}
+
+// ============================================================
+// Main game loop
+// ============================================================
+function update() {
+  if (gameState !== 'playing') return;
+  if (stageTransitionTimer > 0) { stageTransitionTimer--; return; }
+
+  // Player input
+  if (player && player.alive && player.spawnTimer === 0) {
+    player.moving = false;
+    if (keys['ArrowUp'] || keys['KeyW']) player.move(DIR.UP);
+    else if (keys['ArrowRight'] || keys['KeyD']) player.move(DIR.RIGHT);
+    else if (keys['ArrowDown'] || keys['KeyS']) player.move(DIR.DOWN);
+    else if (keys['ArrowLeft'] || keys['KeyA']) player.move(DIR.LEFT);
+
+    if (keys['Space'] || keys['KeyJ']) player.fire();
+  }
+
+  // Update player
+  if (player) player.update();
+
+  // Update enemies
+  for (const e of enemies) {
+    if (e.alive) e.update();
+  }
+
+  // Spawn enemies
+  enemySpawnTimer++;
+  if (enemySpawnTimer >= 120) {
+    enemySpawnTimer = 0;
+    spawnEnemy();
+  }
+
+  // Update bullets
+  updateBullets();
+
+  // Update explosions
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    explosions[i].timer++;
+    if (explosions[i].timer >= explosions[i].maxTimer) explosions.splice(i, 1);
+  }
+
+  // Update powerups
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    powerups[i].timer--;
+    if (powerups[i].timer <= 0) { powerups.splice(i, 1); continue; }
+    // Check if player collects
+    if (player && player.alive) {
+      const pu = powerups[i];
+      if (Math.abs(player.cx - pu.x) < CELL * 2 && Math.abs(player.cy - pu.y) < CELL * 2) {
+        collectPowerup(pu);
+        powerups.splice(i, 1);
+      }
+    }
+  }
+
+  // Freeze timer
+  if (freezeTimer > 0) freezeTimer--;
+
+  // Clean up dead enemies
+  enemies = enemies.filter(e => e.alive || e.spawnTimer > 0);
+
+  // Check stage clear
+  if (enemyQueue.length === 0 && enemies.filter(e => e.alive).length === 0) {
+    stageClear();
+  }
+}
+
+function draw() {
+  ctx.fillStyle = COLORS.bg;
+  ctx.fillRect(0, 0, FIELD, FIELD);
+
+  if (gameState === 'title') return;
+
+  // Draw map (bottom layer - no trees)
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      if (map[y][x] !== T.EMPTY && map[y][x] !== T.TREE) {
+        drawTile(x, y, map[y][x]);
+      }
+    }
+  }
+
+  // Draw tanks
+  if (player && player.alive) player.draw();
+  if (player && !player.alive && player.spawnTimer > 0) player.draw();
+  for (const e of enemies) e.draw();
+
+  // Draw trees (on top of tanks)
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      if (map[y][x] === T.TREE) drawTile(x, y, T.TREE);
+    }
+  }
+
+  // Draw bullets
+  ctx.fillStyle = COLORS.bullet;
+  for (const b of bullets) {
+    ctx.fillRect(b.x, b.y, 4, 4);
+  }
+
+  // Draw explosions
+  for (const exp of explosions) drawExplosion(exp);
+
+  // Draw powerups
+  for (const pu of powerups) drawPowerup(pu);
+
+  // Stage transition text
+  if (stageTransitionTimer > 0) {
+    ctx.fillStyle = '#FFF';
+    ctx.font = '24px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('STAGE ' + stage, FIELD / 2, FIELD / 2);
+  }
+}
+
+function gameLoop() {
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// ============================================================
+// Input handling
+// ============================================================
+document.addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+
+  if (e.code === 'Enter') {
+    if (gameState === 'title') {
+      gameState = 'playing';
+      stage = 1;
+      score = 0;
+      lives = 3;
+      overlay.classList.remove('active');
+      initStage();
+    } else if (gameState === 'gameover') {
+      gameState = 'playing';
+      stage = 1;
+      score = 0;
+      lives = 3;
+      overlay.classList.remove('active');
+      initStage();
+    }
+  }
+
+  e.preventDefault();
+});
+
+document.addEventListener('keyup', (e) => {
+  keys[e.code] = false;
+});
+
+// Start
+gameLoop();
+</script>
+</body>
+</html>
