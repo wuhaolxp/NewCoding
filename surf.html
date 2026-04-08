@@ -127,9 +127,9 @@ window.addEventListener('resize', resize);
 // ============================================================
 let game = {
   running: false,
-  speed: 4,
-  maxSpeed: 14,
-  acceleration: 0.003,
+  speed: 1.2,
+  maxSpeed: 4.2,
+  acceleration: 0.001,
   score: 0,
   highScore: parseInt(localStorage.getItem('surfHighScore') || '0'),
   lives: 3,
@@ -222,7 +222,7 @@ function startGame() {
   document.getElementById('gameOverScreen').style.display = 'none';
   
   game.running = true;
-  game.speed = 4;
+  game.speed = 1.2;
   game.score = 0;
   game.lives = 3;
   game.invincible = 0;
