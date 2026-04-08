@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOOM - Web Edition</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; cursor: none; font-family: 'Courier New', monospace; }
+canvas { display: block; }
+#hud {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 80px;
+    background: linear-gradient(to bottom, rgba(50,50,50,0.9), rgba(30,30,30,0.95));
+    border-top: 2px solid #555;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 30px; z-index: 10;
+}
+.hud-item { color: #ccc; font-size: 14px; text-align: center; }
+.hud-value { font-size: 36px; font-weight: bold; }
+.hud-health .hud-value { color: #e33; }
+.hud-armor .hud-value { color: #33e; }
+.hud-ammo .hud-value { color: #ee3; }
+.hud-face { width: 60px; height: 60px; background: #333; border: 2px solid #666; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center; font-size: 30px; }
+#minimap {
+    position: fixed; top: 10px; right: 10px; z-index: 10;
+    border: 2px solid #0f0; background: rgba(0,0,0,0.7);
+}
+#crosshair {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #0f0; font-size: 24px; z-index: 10; pointer-events: none;
+    text-shadow: 0 0 4px #0f0;
+}
+#message {
+    position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%);
+    color: #f00; font-size: 48px; font-weight: bold; z-index: 20;
+    text-shadow: 0 0 20px #f00; display: none;
+    font-family: 'Impact', sans-serif; letter-spacing: 4px;
+}
+#startScreen {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: #000; z-index: 100; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; color: #c00;
+    font-family: 'Impact', sans-serif;
+}
+#startScreen h1 { font-size: 120px; letter-spacing: 20px; text-shadow: 0 0 40px #f00, 0 0 80px #900; margin-bottom: 20px; }
+#startScreen .subtitle { color: #888; font-size: 20px; font-family: 'Courier New', monospace; margin-bottom: 40px; }
+#startScreen .prompt { color: #f00; font-size: 28px; animation: blink 1s infinite; }
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+#startScreen .controls { color: #666; font-size: 14px; font-family: 'Courier New', monospace; margin-top: 40px; line-height: 2; }
+#damageOverlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(255,0,0,0); z-index: 9; pointer-events: none;
+    transition: background 0.1s;
+}
+#weaponCanvas {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    z-index: 8; pointer-events: none;
+}
+</style>
+</head>
+<body>
+<div id="startScreen">
+    <h1>DOOM</h1>
+    <div class="subtitle">- WEB EDITION -</div>
+    <div class="prompt">CLICK TO START</div>
+    <div class="controls">
+        WASD - Move | Mouse - Look | Click - Shoot<br>
+        SHIFT - Run | E - Open Door
+    </div>
+</div>
+<canvas id="gameCanvas"></canvas>
+<canvas id="minimap" width="180" height="180"></canvas>
+<div id="crosshair">+</div>
+<div id="hud">
+    <div class="hud-item hud-ammo"><div class="hud-value" id="ammoCount">50</div>AMMO</div>
+    <div class="hud-item hud-health"><div class="hud-value" id="healthCount">100</div>HEALTH</div>
+    <div class="hud-face" id="face">:|</div>
+    <div class="hud-item hud-armor"><div class="hud-value" id="armorCount">50</div>ARMOR</div>
+    <div class="hud-item"><div class="hud-value" id="killCount">0</div>KILLS</div>
+</div>
+<div id="damageOverlay"></div>
+<div id="message"></div>
+<canvas id="weaponCanvas" width="300" height="300"></canvas>
+
+<script>
+// ============================================================
+// DOOM WEB EDITION - Raycasting FPS with WebGL display
+// ============================================================
+
+var canvas = document.getElementById('gameCanvas');
+var gl = canvas.getContext('webgl', { antialias: false, powerPreference: 'high-performance' });
+if (!gl) { alert('WebGL not supported!'); }
+
+// ============================================================
+// AUDIO ENGINE
+// ============================================================
+var AudioEngine = {
+    ctx: null,
+    initialized: false,
+
+    init: function() {
+        if (this.initialized) return;
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.initialized = true;
+    },
+
+    noise: function(duration, freq, vol) {
+        if (!this.initialized) return;
+        var c = this.ctx, now = c.currentTime;
+        var len = c.sampleRate * duration;
+        var buf = c.createBuffer(1, len, c.sampleRate);
+        var d = buf.getChannelData(0);
+        for (var i = 0; i < len; i++) {
+            var t = i / len;
+            d[i] = (Math.random() * 2 - 1) * Math.exp(-t * 20) * vol;
+        }
+        var src = c.createBufferSource();
+        src.buffer = buf;
+        var flt = c.createBiquadFilter();
+        flt.type = 'lowpass';
+        flt.frequency.setValueAtTime(freq, now);
+        flt.frequency.exponentialRampToValueAtTime(200, now + duration);
+        var g = c.createGain();
+        g.gain.setValueAtTime(vol, now);
+        g.gain.exponentialRampToValueAtTime(0.01, now + duration);
+        src.connect(flt); flt.connect(g); g.connect(c.destination);
+        src.start(now); src.stop(now + duration);
+    },
+
+    tone: function(freq1, freq2, duration, type, vol) {
+        if (!this.initialized) return;
+        var c = this.ctx, now = c.currentTime;
+        var o = c.createOscillator();
+        o.type = type || 'sawtooth';
+        o.frequency.setValueAtTime(freq1, now);
+        o.frequency.exponentialRampToValueAtTime(freq2, now + duration);
+        var g = c.createGain();
+        g.gain.setValueAtTime(vol || 0.3, now);
+        g.gain.exponentialRampToValueAtTime(0.01, now + duration);
+        o.connect(g); g.connect(c.destination);
+        o.start(now); o.stop(now + duration + 0.01);
+    },
+
+    playShot: function() {
+        this.noise(0.15, 3000, 0.8);
+        this.tone(150, 30, 0.1, 'sine', 0.6);
+    },
+
+    playEnemyHit: function() { this.tone(200, 80, 0.2, 'sawtooth', 0.3); },
+    playEnemyDeath: function() { this.tone(300, 40, 0.5, 'sawtooth', 0.4); },
+    playEnemyAlert: function() { this.tone(100, 180, 0.15, 'sawtooth', 0.2); },
+    playPickup: function() { this.tone(440, 880, 0.15, 'square', 0.2); },
+    playPlayerHurt: function() { this.tone(400, 100, 0.15, 'sawtooth', 0.3); },
+    playDoorOpen: function() { this.tone(80, 40, 0.6, 'sine', 0.15); },
+    playEnemyAttack: function() { this.noise(0.3, 2000, 0.2); },
+
+    playFootstep: function() {
+        if (!this.initialized) return;
+        var c = this.ctx, now = c.currentTime;
+        var len = c.sampleRate * 0.04;
+        var buf = c.createBuffer(1, len, c.sampleRate);
+        var d = buf.getChannelData(0);
+        for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i/len * 30) * 0.08;
+        var src = c.createBufferSource(); src.buffer = buf;
+        var flt = c.createBiquadFilter(); flt.type = 'lowpass'; flt.frequency.value = 400;
+        src.connect(flt); flt.connect(c.destination); src.start(now);
+    },
+
+    startAmbient: function() {
+        if (!this.initialized) return;
+        var c = this.ctx;
+        var o = c.createOscillator(); o.type = 'sine'; o.frequency.value = 42;
+        var g = c.createGain(); g.gain.value = 0.025;
+        o.connect(g); g.connect(c.destination); o.start();
+    }
+};
+
+// ============================================================
+// MAP
+// ============================================================
+var MAP_W = 24, MAP_H = 24;
+var worldMap = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,2,2,2,0,0,0,3,3,3,3,0,0,0,4,4,4,0,0,0,0,1],
+    [1,0,0,2,0,0,0,0,0,0,0,0,3,0,0,0,0,0,4,0,0,0,0,1],
+    [1,0,0,2,0,0,0,0,0,0,0,0,3,0,0,0,0,0,4,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,5,5,6,5,5,0,0,0,0,0,0,0,0,0,7,0,0,1],
+    [1,0,0,0,0,0,5,0,0,0,5,0,0,0,0,0,0,0,0,0,7,0,0,1],
+    [1,0,0,0,0,0,5,0,0,0,5,0,0,3,3,3,3,0,0,0,7,0,0,1],
+    [1,0,0,0,0,0,5,0,0,0,5,0,0,3,0,0,3,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,5,5,0,5,5,0,0,3,0,0,3,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,3,0,0,2,2,2,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,6,0,0,0,0,2,0,2,0,1],
+    [1,0,0,4,4,6,4,4,0,0,0,0,0,0,0,0,0,0,0,2,0,2,0,1],
+    [1,0,0,4,0,0,0,4,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,4,0,0,0,4,0,0,5,0,0,7,7,0,7,7,0,0,0,0,0,1],
+    [1,0,0,4,0,0,0,4,0,0,5,0,0,7,0,0,0,7,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,7,0,0,0,7,0,0,3,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,7,7,6,7,7,0,0,3,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,1],
+    [1,0,0,2,0,0,0,2,0,0,0,3,0,0,0,4,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+];
+
+// Door tracking
+var doors = {};
+function doorKey(x,y) { return x+','+y; }
+for (var dy = 0; dy < MAP_H; dy++)
+    for (var dx = 0; dx < MAP_W; dx++)
+        if (worldMap[dy][dx] === 6) doors[doorKey(dx,dy)] = { open: 0, opening: false, timer: 0 };
+
+// ============================================================
+// TEXTURE GENERATION
+// ============================================================
+var TEX = 128;
+
+function hash(x, y) {
+    var h = (x|0) * 374761393 + (y|0) * 668265263;
+    h = (h ^ (h >> 13)) * 1274126177;
+    return ((h ^ (h >> 16)) & 0xFF) / 255;
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function smoothNoise(x, y) {
+    var ix = Math.floor(x), iy = Math.floor(y);
+    var fx = x - ix, fy = y - iy;
+    return lerp(lerp(hash(ix,iy), hash(ix+1,iy), fx), lerp(hash(ix,iy+1), hash(ix+1,iy+1), fx), fy);
+}
+
+function fbm(x, y) {
+    var v = 0, a = 0.5;
+    for (var i = 0; i < 4; i++) { v += smoothNoise(x, y) * a; x *= 2; y *= 2; a *= 0.5; }
+    return v;
+}
+
+function makeTex(fn) {
+    var d = new Uint8Array(TEX * TEX * 4);
+    for (var y = 0; y < TEX; y++) for (var x = 0; x < TEX; x++) {
+        var i = (y * TEX + x) * 4, c = fn(x, y);
+        d[i] = c[0]; d[i+1] = c[1]; d[i+2] = c[2]; d[i+3] = 255;
+    }
+    return d;
+}
+
+// Stone wall
+function texStone(x, y) {
+    var bH = 16, bW = 32, row = Math.floor(y / bH);
+    var bx = (x + (row % 2) * 16) % bW, by = y % bH;
+    var mortar = bx < 1 || by < 1;
+    var n = fbm(x * 0.15, y * 0.15);
+    if (mortar) return [30 + n * 20, 28 + n * 15, 25 + n * 10];
+    var b = 90 + n * 50 - smoothNoise(x * 0.05, y * 0.08) * 25;
+    return [b, b - 5, b - 8];
+}
+
+// Red brick
+function texBrick(x, y) {
+    var bH = 16, bW = 32, row = Math.floor(y / bH);
+    var bx = (x + (row % 2) * 16) % bW, by = y % bH;
+    var mortar = bx < 2 || by < 2;
+    var n = fbm(x * 0.1, y * 0.1);
+    if (mortar) return [50 + n * 20, 45 + n * 15, 40 + n * 10];
+    var b = 120 + n * 40;
+    return [b + 30, b * 0.35, b * 0.25];
+}
+
+// Tech panel
+function texTech(x, y) {
+    var ps = 32, px = x % ps, py = y % ps;
+    var border = px < 2 || py < 2 || px > ps - 3 || py > ps - 3;
+    var n = fbm(x * 0.2, y * 0.2);
+    if (border) return [55 + n * 20, 60 + n * 20, 70 + n * 25];
+    var rivet = (px < 6 && py < 6) || (px < 6 && py > ps-7) || (px > ps-7 && py < 6) || (px > ps-7 && py > ps-7);
+    if (rivet) return [80, 85, 95];
+    var b = 45 + n * 25 + ((y % 64 < 3) ? 15 : 0);
+    return [b, b + 2, b + 5];
+}
+
+// Door (brown wood)
+function texDoor(x, y) {
+    var grain = Math.sin(y * 0.3 + fbm(x * 0.05, y * 0.02) * 8) * 0.5 + 0.5;
+    var n = fbm(x * 0.15, y * 0.08);
+    if (x < 4 || x > TEX - 5 || y < 4 || y > TEX - 5) return [40, 35, 25];
+    var hx = TEX - 25, hy = TEX / 2;
+    if (Math.sqrt((x-hx)*(x-hx) + (y-hy)*(y-hy)) < 5) return [180, 160, 50];
+    var b = 55 + grain * 40 + n * 30;
+    return [b + 15, b * 0.6, b * 0.35];
+}
+
+// Demon skin
+function texDemon(x, y) {
+    var n = fbm(x * 0.08, y * 0.08), n2 = fbm(x * 0.15 + 50, y * 0.15 + 50);
+    var vein = Math.abs(Math.sin(x * 0.1 + n * 5)) < 0.1 ? 30 : 0;
+    var b = 70 + n * 50;
+    return [b + 40 + vein, b * 0.3 + n2 * 20, b * 0.25 + n2 * 15];
+}
+
+// Floor
+function texFloor(x, y) {
+    var checker = ((Math.floor(x / 32) + Math.floor(y / 32)) % 2);
+    var n = fbm(x * 0.1, y * 0.1);
+    var b = checker ? 40 + n * 20 : 55 + n * 20;
+    return [b, b - 3, b - 5];
+}
+
+// Ceiling
+function texCeil(x, y) {
+    var n = fbm(x * 0.08, y * 0.08);
+    var b = 30 + n * 20 + ((x % 64 < 2 || y % 64 < 2) ? -8 : 0);
+    return [b, b, b + 5];
+}
+
+var wallTex = [makeTex(texStone), makeTex(texBrick), makeTex(texTech), makeTex(texDoor), makeTex(texDemon), makeTex(texDoor), makeTex(texDemon)];
+var floorTex = makeTex(texFloor);
+var ceilTex = makeTex(texCeil);
+
+// ============================================================
+// PLAYER
+// ============================================================
+var player = {
+    x: 2.5, y: 2.5, angle: 0.4, pitch: 0,
+    health: 100, armor: 50, ammo: 50,
+    speed: 0.045, runMul: 1.8,
+    bobPhase: 0, bobAmt: 0,
+    shootTimer: 0, kills: 0, alive: true, footTimer: 0,
+    damageFlash: 0
+};
+
+// ============================================================
+// ENEMIES
+// ============================================================
+var ETYPE = {
+    IMP:   { hp: 60,  spd: 0.012, dmg: 8,  range: 8,   cd: 80,  sz: 0.4, col: [180,80,40] },
+    DEMON: { hp: 120, spd: 0.02,  dmg: 15, range: 1.5, cd: 40,  sz: 0.5, col: [150,50,60] },
+    CACO:  { hp: 200, spd: 0.008, dmg: 20, range: 10,  cd: 100, sz: 0.6, col: [200,60,60] }
+};
+
+var enemies = [];
+function spawnEnemies() {
+    var spawns = [
+        [5,5,'IMP'],[10,4,'DEMON'],[18,5,'IMP'],[8,9,'CACO'],
+        [15,11,'IMP'],[20,13,'DEMON'],[5,16,'IMP'],[14,18,'CACO'],
+        [21,19,'IMP'],[4,21,'DEMON'],[12,21,'IMP'],[18,21,'IMP']
+    ];
+    enemies = spawns.map(function(s) {
+        var t = ETYPE[s[2]];
+        return { x:s[0]+0.5, y:s[1]+0.5, type:t, typeName:s[2], hp:t.hp, alive:true, alert:false, atkTimer:0, hurtTimer:0, deathTimer:0 };
+    });
+}
+spawnEnemies();
+
+// ============================================================
+// PICKUPS
+// ============================================================
+var pickups = [
+    {x:12.5,y:2.5,type:'health',amt:25,on:true}, {x:6.5,y:12.5,type:'ammo',amt:20,on:true},
+    {x:20.5,y:8.5,type:'health',amt:25,on:true}, {x:3.5,y:18.5,type:'ammo',amt:20,on:true},
+    {x:15.5,y:15.5,type:'armor',amt:25,on:true}, {x:10.5,y:20.5,type:'health',amt:50,on:true},
+    {x:22.5,y:22.5,type:'ammo',amt:30,on:true}
+];
+
+// Projectiles
+var projectiles = [];
+
+// ============================================================
+// INPUT
+// ============================================================
+var keys = {};
+var gamePaused = true;
+document.addEventListener('keydown', function(e) { keys[e.key.toLowerCase()] = true; });
+document.addEventListener('keyup', function(e) { keys[e.key.toLowerCase()] = false; });
+document.addEventListener('mousemove', function(e) {
+    if (!gamePaused && document.pointerLockElement) {
+        player.angle += e.movementX * 0.003;
+        player.pitch = Math.max(-1, Math.min(1, player.pitch - e.movementY * 0.003));
+    }
+});
+document.addEventListener('mousedown', function(e) {
+    if (e.button === 0 && !gamePaused && player.alive) shoot();
+});
+
+document.getElementById('startScreen').addEventListener('click', function() {
+    document.getElementById('startScreen').style.display = 'none';
+    gamePaused = false;
+    canvas.requestPointerLock();
+    AudioEngine.init();
+    AudioEngine.startAmbient();
+});
+canvas.addEventListener('click', function() {
+    if (!gamePaused && !document.pointerLockElement) canvas.requestPointerLock();
+});
+
+// ============================================================
+// RESIZE
+// ============================================================
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============================================================
+// WEBGL SETUP
+// ============================================================
+var RW = 640, RH = 400;
+var screenBuf = new Uint8Array(RW * RH * 4);
+var zBuf = new Float32Array(RW);
+
+var screenTexGL = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, screenTexGL);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+var vsSrc = 'attribute vec2 p;varying vec2 uv;void main(){uv=p*0.5+0.5;gl_Position=vec4(p,0,1);}';
+var fsSrc = 'precision mediump float;varying vec2 uv;uniform sampler2D s;void main(){vec2 c=vec2(uv.x,1.0-uv.y);vec4 t=texture2D(s,c);float v=1.0-length(uv-0.5)*0.4;gl_FragColor=vec4(t.rgb*v,1);}';
+
+function mkShader(src, type) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    return s;
+}
+var prog = gl.createProgram();
+gl.attachShader(prog, mkShader(vsSrc, gl.VERTEX_SHADER));
+gl.attachShader(prog, mkShader(fsSrc, gl.FRAGMENT_SHADER));
+gl.linkProgram(prog); gl.useProgram(prog);
+
+var vb = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+var ap = gl.getAttribLocation(prog, 'p');
+gl.enableVertexAttribArray(ap);
+gl.vertexAttribPointer(ap, 2, gl.FLOAT, false, 0, 0);
+
+// ============================================================
+// RAYCASTING
+// ============================================================
+function castRay(px, py, angle) {
+    var dx = Math.cos(angle), dy = Math.sin(angle);
+    var mx = Math.floor(px), my = Math.floor(py);
+    var ddx = Math.abs(1/dx), ddy = Math.abs(1/dy);
+    var sx, sy, sdx, sdy;
+    if (dx < 0) { sx = -1; sdx = (px - mx) * ddx; }
+    else { sx = 1; sdx = (mx + 1 - px) * ddx; }
+    if (dy < 0) { sy = -1; sdy = (py - my) * ddy; }
+    else { sy = 1; sdy = (my + 1 - py) * ddy; }
+
+    var side = 0, wt = 0;
+    for (var i = 0; i < 64; i++) {
+        if (sdx < sdy) { sdx += ddx; mx += sx; side = 0; }
+        else { sdy += ddy; my += sy; side = 1; }
+        if (mx < 0 || mx >= MAP_W || my < 0 || my >= MAP_H) { wt = 1; break; }
+        var cell = worldMap[my][mx];
+        if (cell > 0) {
+            if (cell === 6) {
+                var dk = doorKey(mx, my);
+                if (doors[dk] && doors[dk].open > 0.9) continue;
+            }
+            wt = cell; break;
+        }
+    }
+
+    var dist = side === 0 ? sdx - ddx : sdy - ddy;
+    var wallX = side === 0 ? py + dist * dy : px + dist * dx;
+    wallX -= Math.floor(wallX);
+    if (wt === 6) {
+        var dk2 = doorKey(mx, my);
+        if (doors[dk2]) wallX = (wallX + doors[dk2].open) % 1;
+    }
+    return { dist: Math.max(dist, 0.001), side: side, wallX: wallX, wt: wt, mx: mx, my: my };
+}
+
+function sampleTex(td, u, v) {
+    var tx = (Math.floor(u * TEX) & (TEX-1)), ty = (Math.floor(v * TEX) & (TEX-1));
+    var i = (ty * TEX + tx) * 4;
+    return [td[i], td[i+1], td[i+2]];
+}
+
+// ============================================================
+// RENDER
+// ============================================================
+function render() {
+    var w = RW, h = RH, hh = h / 2;
+    var fov = Math.PI / 3;
+    var po = player.pitch * hh;
+    var bob = Math.sin(player.bobPhase) * player.bobAmt;
+
+    // Clear
+    for (var i = 0; i < w * h * 4; i += 4) {
+        screenBuf[i] = 10; screenBuf[i+1] = 8; screenBuf[i+2] = 15; screenBuf[i+3] = 255;
+    }
+
+    // Floor & ceiling casting
+    for (var y = Math.floor(hh + po) + 1; y < h; y++) {
+        var rdx0 = Math.cos(player.angle - fov/2), rdy0 = Math.sin(player.angle - fov/2);
+        var rdx1 = Math.cos(player.angle + fov/2), rdy1 = Math.sin(player.angle + fov/2);
+        var p = y - hh - po;
+        if (p <= 0) continue;
+        var rowDist = hh / p;
+        var fsx = rowDist * (rdx1 - rdx0) / w, fsy = rowDist * (rdy1 - rdy0) / w;
+        var fx = player.x + rowDist * rdx0, fy = player.y + rowDist * rdy0;
+        var fog = Math.min(0.9, rowDist / 12);
+        var bright = 1 - fog;
+
+        for (var x = 0; x < w; x++) {
+            var tx = (Math.floor(fx * TEX) & (TEX-1)), ty = (Math.floor(fy * TEX) & (TEX-1));
+            var fi = (ty * TEX + tx) * 4;
+            var idx = (y * w + x) * 4;
+            screenBuf[idx] = (floorTex[fi] * bright) | 0;
+            screenBuf[idx+1] = (floorTex[fi+1] * bright) | 0;
+            screenBuf[idx+2] = (floorTex[fi+2] * bright) | 0;
+
+            var cy = Math.floor(2 * hh + 2 * po - y);
+            if (cy >= 0 && cy < h) {
+                var ci = (cy * w + x) * 4;
+                screenBuf[ci] = (ceilTex[fi] * bright) | 0;
+                screenBuf[ci+1] = (ceilTex[fi+1] * bright) | 0;
+                screenBuf[ci+2] = (ceilTex[fi+2] * bright) | 0;
+            }
+            fx += fsx; fy += fsy;
+        }
+    }
+
+    // Walls
+    for (var x = 0; x < w; x++) {
+        var camX = 2 * x / w - 1;
+        var rayAngle = player.angle + Math.atan(camX * Math.tan(fov / 2));
+        var ray = castRay(player.x, player.y, rayAngle);
+
+        zBuf[x] = ray.dist;
+        var lh = (h / ray.dist) | 0;
+        var ds = Math.max(0, ((hh - lh / 2 + po + bob) | 0));
+        var de = Math.min(h - 1, ((hh + lh / 2 + po + bob) | 0));
+
+        var ti = Math.max(0, Math.min(wallTex.length - 1, ray.wt - 1));
+        var td = wallTex[ti];
+        var fog = Math.min(0.85, ray.dist / 15);
+        var sdim = ray.side ? 0.7 : 1.0;
+        var bright = sdim * (1 - fog);
+
+        for (var y = ds; y <= de; y++) {
+            var d = y - po - bob - hh + lh / 2;
+            var texY = ((d * TEX / lh) | 0) & (TEX - 1);
+            var texX = ((ray.wallX * TEX) | 0) & (TEX - 1);
+            var tI = (texY * TEX + texX) * 4;
+            var idx = (y * w + x) * 4;
+            screenBuf[idx] = (td[tI] * bright) | 0;
+            screenBuf[idx+1] = (td[tI+1] * bright) | 0;
+            screenBuf[idx+2] = (td[tI+2] * bright) | 0;
+        }
+    }
+
+    // Sprites
+    renderSprites(w, h, hh, fov, po + bob);
+
+    // Upload & draw
+    gl.bindTexture(gl.TEXTURE_2D, screenTexGL);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, RW, RH, 0, gl.RGBA, gl.UNSIGNED_BYTE, screenBuf);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ============================================================
+// SPRITE RENDERING
+// ============================================================
+function renderSprites(w, h, hh, fov, po) {
+    var sprites = [];
+    var i;
+    for (i = 0; i < enemies.length; i++) {
+        var e = enemies[i];
+        if (e.deathTimer > 30) continue;
+        var ddx = e.x - player.x, ddy = e.y - player.y;
+        sprites.push({ x:e.x, y:e.y, dist: Math.sqrt(ddx*ddx+ddy*ddy), enemy:true, ref:e });
+    }
+    for (i = 0; i < pickups.length; i++) {
+        var p = pickups[i];
+        if (!p.on) continue;
+        var ddx2 = p.x - player.x, ddy2 = p.y - player.y;
+        sprites.push({ x:p.x, y:p.y, dist: Math.sqrt(ddx2*ddx2+ddy2*ddy2), enemy:false, ref:p });
+    }
+    for (i = 0; i < projectiles.length; i++) {
+        var pr = projectiles[i];
+        var ddx3 = pr.x - player.x, ddy3 = pr.y - player.y;
+        sprites.push({ x:pr.x, y:pr.y, dist: Math.sqrt(ddx3*ddx3+ddy3*ddy3), proj:true, ref:pr });
+    }
+
+    sprites.sort(function(a, b) { return b.dist - a.dist; });
+
+    for (i = 0; i < sprites.length; i++) {
+        var sp = sprites[i];
+        var adx = sp.x - player.x, ady = sp.y - player.y;
+        var angTo = Math.atan2(ady, adx);
+        var angDiff = angTo - player.angle;
+        while (angDiff > Math.PI) angDiff -= 2 * Math.PI;
+        while (angDiff < -Math.PI) angDiff += 2 * Math.PI;
+        if (Math.abs(angDiff) > fov * 0.7) continue;
+
+        var scrX = ((0.5 + angDiff / fov) * w) | 0;
+        var spH = (h / sp.dist) | 0;
+        var spW = spH;
+        var fog = Math.min(0.85, sp.dist / 15);
+
+        var y1 = Math.max(0, (hh + po - spH / 2) | 0);
+        var y2 = Math.min(h - 1, (hh + po + spH / 2) | 0);
+        var x1 = Math.max(0, (scrX - spW / 2) | 0);
+        var x2 = Math.min(w - 1, (scrX + spW / 2) | 0);
+
+        if (sp.proj) {
+            drawProjectile(sp.ref, w, h, x1, x2, y1, y2, spW, spH, fog, sp.dist);
+        } else if (sp.enemy) {
+            drawEnemy(sp.ref, w, h, x1, x2, y1, y2, spW, spH, fog, sp.dist);
+        } else {
+            drawPickup(sp.ref, w, h, x1, x2, y1, y2, spW, spH, fog, sp.dist);
+        }
+    }
+}
+
+function drawEnemy(en, w, h, x1, x2, y1, y2, sw, sh, fog, dist) {
+    var hurt = en.hurtTimer > 0;
+    var dying = !en.alive;
+    var dp = dying ? Math.min(1, en.deathTimer / 25) : 0;
+
+    for (var x = x1; x <= x2; x++) {
+        if (dist > zBuf[x]) continue;
+        var u = (x - x1) / (x2 - x1 || 1);
+        for (var y = y1; y <= y2; y++) {
+            var v = (y - y1) / (y2 - y1 || 1);
+            if (dying) { v += dp * 0.4; if (v > 1) continue; }
+            var px = enemyPixel(en.type, en.typeName, u, v, en.alert);
+            if (!px) continue;
+            var idx = (y * w + x) * 4;
+            var b = 1 - fog;
+            var r = px[0] * b, g = px[1] * b, bl = px[2] * b;
+            if (hurt) { r = Math.min(255, r + 120); g *= 0.4; bl *= 0.4; }
+            if (dying) { r *= (1 - dp * 0.5); g *= (1 - dp * 0.5); bl *= (1 - dp * 0.5); }
+            screenBuf[idx] = r | 0; screenBuf[idx+1] = g | 0; screenBuf[idx+2] = bl | 0;
+        }
+    }
+}
+
+function enemyPixel(type, name, u, v, alert) {
+    var cx = 0.5, cy = 0.5, dx = u - cx, dy = v - cy;
+
+    if (name === 'IMP') {
+        // Head
+        var hd = Math.sqrt(dx * dx + (v - 0.22) * (v - 0.22));
+        if (hd < 0.12) {
+            // Eyes
+            if (Math.sqrt((u-0.44)*(u-0.44)+(v-0.2)*(v-0.2)) < 0.022) return [255, alert?50:200, 0];
+            if (Math.sqrt((u-0.56)*(u-0.56)+(v-0.2)*(v-0.2)) < 0.022) return [255, alert?50:200, 0];
+            // Mouth
+            if (v > 0.25 && v < 0.3 && Math.abs(dx) < 0.06) return [80, 20, 20];
+            var n = fbm(u*8, v*8);
+            return [155 + n*35, 68 + n*18, 33 + n*10];
+        }
+        // Horns
+        if ((u>0.32&&u<0.38&&v>0.06&&v<0.17) || (u>0.62&&u<0.68&&v>0.06&&v<0.17)) return [110, 50, 25];
+        // Body
+        var bw = 0.22 * (1 - Math.abs(v - 0.52) * 1.5);
+        if (bw > 0 && Math.abs(dx) < bw && v > 0.3 && v < 0.85) {
+            var n2 = fbm(u*6,v*6);
+            // Belt
+            if (v > 0.58 && v < 0.63) return [60, 50, 30];
+            return [138 + n2*35, 62 + n2*18, 28 + n2*12];
+        }
+        // Arms
+        if ((u>0.18&&u<0.3&&v>0.33&&v<0.6) || (u>0.7&&u<0.82&&v>0.33&&v<0.6)) {
+            var n3 = fbm(u*6,v*6);
+            // Claws
+            if (v > 0.55) return [100, 40, 20];
+            return [130 + n3*30, 58 + n3*15, 28 + n3*10];
+        }
+        // Legs
+        if ((u>0.36&&u<0.46&&v>0.68&&v<0.95) || (u>0.54&&u<0.64&&v>0.68&&v<0.95)) {
+            var n4 = fbm(u*5,v*5);
+            return [125 + n4*25, 55 + n4*15, 25 + n4*10];
+        }
+        return null;
+    }
+
+    if (name === 'DEMON') {
+        // Head
+        var hw = 0.18 + Math.max(0, v - 0.08) * 0.6;
+        if (Math.abs(dx) < hw && v > 0.03 && v < 0.28) {
+            // Eyes
+            if (Math.sqrt((u-0.4)*(u-0.4)+(v-0.1)*(v-0.1)) < 0.028) return [255, alert?0:180, 0];
+            if (Math.sqrt((u-0.6)*(u-0.6)+(v-0.1)*(v-0.1)) < 0.028) return [255, alert?0:180, 0];
+            // Teeth
+            if (v > 0.2 && v < 0.27 && Math.abs(dx) < 0.14 && Math.sin(u * 35) > 0) return [230, 220, 200];
+            var n = fbm(u*5,v*5);
+            return [145+n*28, 42+n*18, 52+n*14];
+        }
+        // Body (wide)
+        var bw2 = 0.33 * (1 - Math.abs(v - 0.48) * 0.9);
+        if (bw2 > 0 && Math.abs(dx) < bw2 && v > 0.2 && v < 0.78) {
+            var n2 = fbm(u*4,v*4);
+            // Spinal ridge
+            if (Math.abs(dx) < 0.03 && v > 0.25 && v < 0.7) return [120, 35, 40];
+            return [140+n2*28, 40+n2*18, 50+n2*14];
+        }
+        // Legs (thick)
+        if ((u>0.28&&u<0.44&&v>0.65&&v<0.97) || (u>0.56&&u<0.72&&v>0.65&&v<0.97)) {
+            var n3 = fbm(u*4,v*4);
+            // Hooves
+            if (v > 0.9) return [80, 30, 25];
+            return [135+n3*25, 38+n3*15, 48+n3*12];
+        }
+        return null;
+    }
+
+    if (name === 'CACO') {
+        var dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > 0.42) return null;
+        // Eye
+        var ed = Math.sqrt((u-0.5)*(u-0.5)+(v-0.33)*(v-0.33));
+        if (ed < 0.08) {
+            if (ed < 0.03) return [50, 255, 50];
+            return [200, 200, 170];
+        }
+        // Mouth
+        if (Math.abs(v - 0.58) < 0.04 && Math.abs(dx) < 0.18) {
+            if (Math.sin(u * 30) > 0.2) return [220, 210, 190]; // teeth
+            return [70, 10, 10];
+        }
+        // Horns
+        if ((u>0.28&&u<0.35&&v<0.14&&v>0.01)||(u>0.46&&u<0.54&&v<0.09)||(u>0.65&&u<0.72&&v<0.14&&v>0.01))
+            return [130, 25, 25];
+        // Body shading (sphere)
+        var shade = Math.max(0.2, 1 - dist * 1.8);
+        var n = fbm(u*6,v*6);
+        return [(175+n*35)*shade|0, (38+n*18)*shade|0, (38+n*18)*shade|0];
+    }
+    return null;
+}
+
+function drawPickup(pk, w, h, x1, x2, y1, y2, sw, sh, fog, dist) {
+    var bobY = Math.sin(Date.now() * 0.004) * 2;
+    for (var x = x1; x <= x2; x++) {
+        if (dist > zBuf[x]) continue;
+        var u = (x - x1) / (x2 - x1 || 1);
+        for (var y = y1; y <= y2; y++) {
+            var v = (y + bobY - y1) / (y2 - y1 || 1);
+            var d = Math.sqrt((u-0.5)*(u-0.5)+(v-0.5)*(v-0.5));
+            if (d > 0.35) continue;
+            var idx = (y * w + x) * 4;
+            var b = (1-fog) * (1-d*1.5);
+            var glow = Math.sin(Date.now()*0.005)*0.2+0.8;
+            var r=0, g=0, bl=0;
+            if (pk.type==='health') {
+                r=180*b*glow; g=40*b; bl=40*b;
+                if ((Math.abs(u-0.5)<0.05&&Math.abs(v-0.5)<0.15)||(Math.abs(v-0.5)<0.05&&Math.abs(u-0.5)<0.15))
+                    { r=255; g=255; bl=255; }
+            } else if (pk.type==='ammo') {
+                r=180*b*glow; g=160*b*glow; bl=40*b;
+                if (Math.abs(u-0.5)<0.06&&v>0.3&&v<0.7) { r=255; g=220; bl=100; }
+            } else {
+                r=40*b; g=80*b*glow; bl=180*b*glow;
+                if (d<0.2&&d>0.1) { r=80; g=130; bl=255; }
+            }
+            screenBuf[idx]=r|0; screenBuf[idx+1]=g|0; screenBuf[idx+2]=bl|0;
+        }
+    }
+}
+
+function drawProjectile(pr, w, h, x1, x2, y1, y2, sw, sh, fog, dist) {
+    for (var x = x1; x <= x2; x++) {
+        if (dist > zBuf[x]) continue;
+        var u = (x - x1) / (x2 - x1 || 1);
+        for (var y = y1; y <= y2; y++) {
+            var v = (y - y1) / (y2 - y1 || 1);
+            var d = Math.sqrt((u-0.5)*(u-0.5)+(v-0.5)*(v-0.5));
+            if (d > 0.4) continue;
+            var idx = (y * w + x) * 4;
+            var b = (1-fog);
+            var core = d < 0.15;
+            screenBuf[idx] = core ? 255 : ((200*(1-d*2))*b)|0;
+            screenBuf[idx+1] = core ? 200 : ((100*(1-d*2))*b)|0;
+            screenBuf[idx+2] = core ? 50 : ((30*(1-d*2))*b)|0;
+        }
+    }
+}
+
+// ============================================================
+// WEAPON RENDERING
+// ============================================================
+var weaponCtx = document.getElementById('weaponCanvas').getContext('2d');
+
+function drawWeapon() {
+    var c = weaponCtx;
+    var cw = 300, ch = 300;
+    c.clearRect(0, 0, cw, ch);
+
+    var bobX = Math.sin(player.bobPhase) * player.bobAmt * 8;
+    var bobY = Math.abs(Math.cos(player.bobPhase)) * player.bobAmt * 5;
+    var recoil = player.shootTimer > 0 ? Math.max(0, (player.shootTimer - 5)) * 3 : 0;
+    var flash = player.shootTimer > 12;
+
+    c.save();
+    c.translate(150 + bobX, 300 + bobY + recoil);
+
+    // Muzzle flash
+    if (flash) {
+        c.fillStyle = '#ff8';
+        c.globalAlpha = 0.8;
+        c.beginPath();
+        c.ellipse(150, -30, 40 + Math.random()*20, 25 + Math.random()*15, 0, 0, Math.PI*2);
+        c.fill();
+        c.fillStyle = '#fff';
+        c.beginPath();
+        c.ellipse(150, -30, 15, 10, 0, 0, Math.PI*2);
+        c.fill();
+        c.globalAlpha = 1;
+    }
+
+    // Shotgun body
+    var grd = c.createLinearGradient(120, 0, 180, 0);
+    grd.addColorStop(0, '#444');
+    grd.addColorStop(0.3, '#666');
+    grd.addColorStop(0.5, '#777');
+    grd.addColorStop(0.7, '#666');
+    grd.addColorStop(1, '#444');
+
+    // Barrel
+    c.fillStyle = grd;
+    c.fillRect(138, -20, 24, 180);
+
+    // Barrel holes (double barrel)
+    c.fillStyle = '#222';
+    c.beginPath(); c.arc(146, -18, 6, 0, Math.PI*2); c.fill();
+    c.beginPath(); c.arc(158, -18, 6, 0, Math.PI*2); c.fill();
+
+    // Barrel rim
+    c.strokeStyle = '#555';
+    c.lineWidth = 2;
+    c.strokeRect(136, -22, 28, 6);
+
+    // Pump grip
+    var pumpY = player.shootTimer > 0 && player.shootTimer < 8 ? 15 : 0;
+    c.fillStyle = '#5a3a1a';
+    c.fillRect(132, 80 + pumpY, 36, 40);
+    c.strokeStyle = '#3a2510';
+    c.lineWidth = 1;
+    for (var i = 0; i < 5; i++) {
+        c.beginPath();
+        c.moveTo(132, 85 + pumpY + i * 8);
+        c.lineTo(168, 85 + pumpY + i * 8);
+        c.stroke();
+    }
+
+    // Stock/grip
+    c.fillStyle = '#4a2a10';
+    c.beginPath();
+    c.moveTo(135, 160);
+    c.lineTo(165, 160);
+    c.lineTo(175, 280);
+    c.lineTo(125, 280);
+    c.closePath();
+    c.fill();
+
+    // Grip texture
+    c.strokeStyle = '#3a1a08';
+    c.lineWidth = 1;
+    for (var j = 0; j < 8; j++) {
+        c.beginPath();
+        c.moveTo(130, 170 + j * 13);
+        c.lineTo(170, 170 + j * 13);
+        c.stroke();
+    }
+
+    // Trigger guard
+    c.strokeStyle = '#555';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.arc(150, 168, 10, 0, Math.PI);
+    c.stroke();
+
+    // Hand
+    c.fillStyle = '#c49060';
+    c.fillRect(125, 230, 50, 35);
+    c.fillStyle = '#b08050';
+    for (var f = 0; f < 4; f++) {
+        c.fillRect(127 + f * 12, 260, 10, 18);
+    }
+    // Thumb
+    c.fillStyle = '#c49060';
+    c.fillRect(120, 235, 12, 25);
+
+    c.restore();
+}
+
+// ============================================================
+// MINIMAP
+// ============================================================
+var minimapCtx = document.getElementById('minimap').getContext('2d');
+
+function drawMinimap() {
+    var c = minimapCtx;
+    var mw = 180, mh = 180;
+    var scale = 7;
+    c.fillStyle = 'rgba(0,0,0,0.8)';
+    c.fillRect(0, 0, mw, mh);
+
+    var ox = mw/2 - player.x * scale;
+    var oy = mh/2 - player.y * scale;
+
+    // Walls
+    for (var y = 0; y < MAP_H; y++) {
+        for (var x = 0; x < MAP_W; x++) {
+            if (worldMap[y][x] > 0) {
+                var cell = worldMap[y][x];
+                if (cell === 6) {
+                    var dk = doorKey(x, y);
+                    if (doors[dk] && doors[dk].open > 0.5) {
+                        c.fillStyle = '#050';
+                        c.fillRect(ox + x * scale, oy + y * scale, scale, scale);
+                        continue;
+                    }
+                    c.fillStyle = '#880';
+                } else if (cell === 1) c.fillStyle = '#555';
+                else if (cell === 2) c.fillStyle = '#833';
+                else if (cell === 3) c.fillStyle = '#558';
+                else if (cell === 4) c.fillStyle = '#853';
+                else if (cell === 5) c.fillStyle = '#585';
+                else c.fillStyle = '#844';
+                c.fillRect(ox + x * scale, oy + y * scale, scale, scale);
+            }
+        }
+    }
+
+    // Pickups
+    for (var i = 0; i < pickups.length; i++) {
+        var p = pickups[i];
+        if (!p.on) continue;
+        c.fillStyle = p.type === 'health' ? '#f44' : p.type === 'ammo' ? '#ff4' : '#44f';
+        c.fillRect(ox + p.x * scale - 1, oy + p.y * scale - 1, 3, 3);
+    }
+
+    // Enemies
+    for (var j = 0; j < enemies.length; j++) {
+        var e = enemies[j];
+        if (!e.alive) continue;
+        c.fillStyle = e.alert ? '#f00' : '#f80';
+        c.fillRect(ox + e.x * scale - 2, oy + e.y * scale - 2, 4, 4);
+    }
+
+    // Player
+    c.fillStyle = '#0f0';
+    c.fillRect(ox + player.x * scale - 2, oy + player.y * scale - 2, 5, 5);
+
+    // Direction
+    c.strokeStyle = '#0f0';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(mw/2, mh/2);
+    c.lineTo(mw/2 + Math.cos(player.angle) * 12, mh/2 + Math.sin(player.angle) * 12);
+    c.stroke();
+}
+
+// ============================================================
+// GAME LOGIC
+// ============================================================
+function isWall(x, y) {
+    var mx = Math.floor(x), my = Math.floor(y);
+    if (mx < 0 || mx >= MAP_W || my < 0 || my >= MAP_H) return true;
+    var cell = worldMap[my][mx];
+    if (cell === 0) return false;
+    if (cell === 6) {
+        var dk = doorKey(mx, my);
+        return !(doors[dk] && doors[dk].open > 0.8);
+    }
+    return true;
+}
+
+function update() {
+    if (gamePaused || !player.alive) return;
+
+    // Movement
+    var spd = player.speed * (keys['shift'] ? player.runMul : 1);
+    var moved = false;
+    var dx = Math.cos(player.angle), dy = Math.sin(player.angle);
+    var rx = Math.cos(player.angle + Math.PI/2), ry = Math.sin(player.angle + Math.PI/2);
+
+    var nx = player.x, ny = player.y;
+    if (keys['w']) { nx += dx * spd; ny += dy * spd; moved = true; }
+    if (keys['s']) { nx -= dx * spd; ny -= dy * spd; moved = true; }
+    if (keys['a']) { nx -= rx * spd; ny -= ry * spd; moved = true; }
+    if (keys['d']) { nx += rx * spd; ny += ry * spd; moved = true; }
+
+    // Collision (with sliding)
+    var margin = 0.2;
+    if (!isWall(nx, player.y)) player.x = nx;
+    if (!isWall(player.x, ny)) player.y = ny;
+
+    // Head bob
+    if (moved) {
+        player.bobPhase += 0.12;
+        player.bobAmt = Math.min(1, player.bobAmt + 0.05);
+        player.footTimer++;
+        if (player.footTimer > 20) { player.footTimer = 0; AudioEngine.playFootstep(); }
+    } else {
+        player.bobAmt *= 0.9;
+        player.footTimer = 0;
+    }
+
+    // Shoot timer
+    if (player.shootTimer > 0) player.shootTimer--;
+
+    // Door interaction
+    if (keys['e']) {
+        keys['e'] = false;
+        var doorX = Math.floor(player.x + dx * 1.5);
+        var doorY = Math.floor(player.y + dy * 1.5);
+        if (doorX >= 0 && doorX < MAP_W && doorY >= 0 && doorY < MAP_H && worldMap[doorY][doorX] === 6) {
+            var dk = doorKey(doorX, doorY);
+            if (doors[dk] && !doors[dk].opening) {
+                doors[dk].opening = true;
+                doors[dk].timer = 180;
+                AudioEngine.playDoorOpen();
+            }
+        }
+    }
+
+    // Update doors
+    for (var dk in doors) {
+        var d = doors[dk];
+        if (d.opening) {
+            d.open = Math.min(1, d.open + 0.02);
+            if (d.open >= 0.95) {
+                d.timer--;
+                if (d.timer <= 0) { d.opening = false; }
+            }
+        } else if (d.open > 0) {
+            d.open = Math.max(0, d.open - 0.01);
+        }
+    }
+
+    // Pickup collection
+    for (var i = 0; i < pickups.length; i++) {
+        var p = pickups[i];
+        if (!p.on) continue;
+        var pdx = p.x - player.x, pdy = p.y - player.y;
+        if (pdx*pdx + pdy*pdy < 0.8) {
+            p.on = false;
+            AudioEngine.playPickup();
+            if (p.type === 'health') player.health = Math.min(100, player.health + p.amt);
+            else if (p.type === 'ammo') player.ammo = Math.min(99, player.ammo + p.amt);
+            else player.armor = Math.min(100, player.armor + p.amt);
+            showMsg('+' + p.amt + ' ' + p.type.toUpperCase(), '#0f0', 800);
+        }
+    }
+
+    // Enemy AI
+    updateEnemies();
+
+    // Projectiles
+    updateProjectiles();
+
+    // Damage flash
+    if (player.damageFlash > 0) {
+        player.damageFlash -= 0.05;
+        document.getElementById('damageOverlay').style.background = 'rgba(255,0,0,' + Math.max(0, player.damageFlash * 0.4) + ')';
+    }
+
+    // Update HUD
+    document.getElementById('healthCount').textContent = player.health;
+    document.getElementById('armorCount').textContent = player.armor;
+    document.getElementById('ammoCount').textContent = player.ammo;
+    document.getElementById('killCount').textContent = player.kills;
+
+    // Face
+    var face = document.getElementById('face');
+    if (player.health > 80) face.textContent = '>:)';
+    else if (player.health > 50) face.textContent = ':|';
+    else if (player.health > 25) face.textContent = '>:(';
+    else face.textContent = 'x_x';
+}
+
+function updateEnemies() {
+    for (var i = 0; i < enemies.length; i++) {
+        var e = enemies[i];
+        if (e.hurtTimer > 0) e.hurtTimer--;
+
+        if (!e.alive) {
+            e.deathTimer++;
+            continue;
+        }
+
+        var edx = player.x - e.x, edy = player.y - e.y;
+        var dist = Math.sqrt(edx * edx + edy * edy);
+
+        // Line of sight check
+        var hasLOS = checkLOS(e.x, e.y, player.x, player.y);
+
+        // Alert
+        if (dist < 12 && hasLOS && !e.alert) {
+            e.alert = true;
+            AudioEngine.playEnemyAlert();
+        }
+
+        if (!e.alert) continue;
+
+        // Move toward player
+        if (dist > (e.type === ETYPE.DEMON ? 0.8 : 2)) {
+            var ang = Math.atan2(edy, edx);
+            var mx = e.x + Math.cos(ang) * e.type.spd;
+            var my = e.y + Math.sin(ang) * e.type.spd;
+            if (!isWall(mx, e.y)) e.x = mx;
+            if (!isWall(e.x, my)) e.y = my;
+        }
+
+        // Attack
+        e.atkTimer--;
+        if (e.atkTimer <= 0 && dist < e.type.range && hasLOS) {
+            e.atkTimer = e.type.cd;
+            if (e.type === ETYPE.DEMON) {
+                // Melee
+                hurtPlayer(e.type.dmg);
+            } else {
+                // Ranged - fireball
+                var ang2 = Math.atan2(player.y - e.y, player.x - e.x);
+                projectiles.push({
+                    x: e.x, y: e.y, dx: Math.cos(ang2) * 0.08, dy: Math.sin(ang2) * 0.08,
+                    dmg: e.type.dmg, life: 120
+                });
+                AudioEngine.playEnemyAttack();
+            }
+        }
+    }
+}
+
+function checkLOS(x1, y1, x2, y2) {
+    var ddx = x2 - x1, ddy = y2 - y1;
+    var dist = Math.sqrt(ddx*ddx + ddy*ddy);
+    var steps = Math.ceil(dist * 4);
+    for (var i = 1; i < steps; i++) {
+        var t = i / steps;
+        var cx = x1 + ddx * t, cy = y1 + ddy * t;
+        var cell = worldMap[Math.floor(cy)][Math.floor(cx)];
+        if (cell > 0 && cell !== 6) return false;
+        if (cell === 6) {
+            var dk = doorKey(Math.floor(cx), Math.floor(cy));
+            if (doors[dk] && doors[dk].open < 0.5) return false;
+        }
+    }
+    return true;
+}
+
+function updateProjectiles() {
+    for (var i = projectiles.length - 1; i >= 0; i--) {
+        var p = projectiles[i];
+        p.x += p.dx;
+        p.y += p.dy;
+        p.life--;
+
+        // Hit wall
+        if (isWall(p.x, p.y) || p.life <= 0) {
+            projectiles.splice(i, 1);
+            continue;
+        }
+
+        // Hit player
+        var pdx = p.x - player.x, pdy = p.y - player.y;
+        if (pdx*pdx + pdy*pdy < 0.3) {
+            hurtPlayer(p.dmg);
+            projectiles.splice(i, 1);
+        }
+    }
+}
+
+function hurtPlayer(dmg) {
+    if (!player.alive) return;
+    var absorbed = Math.min(player.armor, Math.floor(dmg * 0.5));
+    player.armor -= absorbed;
+    player.health -= (dmg - absorbed);
+    player.damageFlash = 1;
+    AudioEngine.playPlayerHurt();
+    if (player.health <= 0) {
+        player.health = 0;
+        player.alive = false;
+        showMsg('YOU DIED', '#f00', 3000);
+        setTimeout(function() {
+            player.health = 100; player.armor = 50; player.ammo = 50;
+            player.x = 2.5; player.y = 2.5; player.angle = 0.4;
+            player.alive = true; player.kills = 0;
+            spawnEnemies();
+            pickups.forEach(function(p) { p.on = true; });
+            projectiles = [];
+        }, 3000);
+    }
+}
+
+function shoot() {
+    if (player.shootTimer > 0 || player.ammo <= 0) return;
+    player.ammo--;
+    player.shootTimer = 15;
+    AudioEngine.playShot();
+
+    // Hitscan with spread (shotgun)
+    for (var pellet = 0; pellet < 5; pellet++) {
+        var spread = (Math.random() - 0.5) * 0.06;
+        var rayAng = player.angle + spread;
+        var ray = castRay(player.x, player.y, rayAng);
+
+        // Check enemies
+        for (var i = 0; i < enemies.length; i++) {
+            var e = enemies[i];
+            if (!e.alive) continue;
+            var edx = e.x - player.x, edy = e.y - player.y;
+            var eDist = Math.sqrt(edx*edx + edy*edy);
+            if (eDist > ray.dist) continue; // behind wall
+
+            var angTo = Math.atan2(edy, edx);
+            var angDiff = angTo - rayAng;
+            while (angDiff > Math.PI) angDiff -= 2*Math.PI;
+            while (angDiff < -Math.PI) angDiff += 2*Math.PI;
+
+            var hitWidth = e.type.sz / eDist;
+            if (Math.abs(angDiff) < hitWidth) {
+                var dmg = Math.floor(15 * (1 - eDist / 15));
+                dmg = Math.max(3, dmg);
+                e.hp -= dmg;
+                e.hurtTimer = 8;
+                e.alert = true;
+                AudioEngine.playEnemyHit();
+
+                if (e.hp <= 0) {
+                    e.alive = false;
+                    e.deathTimer = 0;
+                    player.kills++;
+                    AudioEngine.playEnemyDeath();
+                    showMsg(e.typeName + ' KILLED!', '#f80', 600);
+                }
+                break;
+            }
+        }
+    }
+}
+
+// ============================================================
+// MESSAGES
+// ============================================================
+var msgTimeout = null;
+function showMsg(text, color, duration) {
+    var el = document.getElementById('message');
+    el.textContent = text;
+    el.style.color = color;
+    el.style.display = 'block';
+    if (msgTimeout) clearTimeout(msgTimeout);
+    msgTimeout = setTimeout(function() { el.style.display = 'none'; }, duration);
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+function gameLoop() {
+    update();
+    if (!gamePaused) {
+        render();
+        drawWeapon();
+        drawMinimap();
+    }
+    requestAnimationFrame(gameLoop);
+}
+gameLoop();
+
+</script>
+</body>
+</html>
